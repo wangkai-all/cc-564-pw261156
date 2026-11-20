@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>价带汇总台</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #f5f6f8; color: #1f2329;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  label { font-size: 13px; color: #374151; display: block; margin: 8px 0 4px; }
+  select, input[type=text] {
+    width: 100%; padding: 7px 9px; font-size: 13px;
+    border: 1px solid #d1d5db; border-radius: 6px; background: #fff;
+  }
+  button {
+    padding: 8px 14px; font-size: 13px; border-radius: 6px; cursor: pointer;
+    border: 1px solid #2563eb; background: #2563eb; color: #fff; margin: 4px 6px 4px 0;
+  }
+  button.ghost { background: #fff; color: #2563eb; }
+  button.warn { border-color: #b45309; background: #b45309; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; }
+  th { background: #f3f4f6; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .kv { font-size: 13px; line-height: 1.9; }
+  .kv b { display: inline-block; min-width: 96px; color: #6b7280; font-weight: normal; }
+  .banner {
+    padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 10px;
+    background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+  }
+  .banner.err { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+  #result:empty::before { content: "（尚未操作，结果会显示在这里）"; color: #9ca3af; font-size: 13px; }
+  .ops { margin-top: 6px; }
+  .hint { font-size: 12px; color: #9ca3af; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <h1>价带汇总台</h1>
+  <div class="sub">成交价以分存储 · 价带规则按版本独立发布 · 半开区间分桶，边界交易只进一个桶</div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>当前状态</h2>
+        <div class="kv" id="state">加载中…</div>
+        <div class="ops">
+          <button class="ghost" id="btn-refresh" type="button">刷新状态</button>
+          <button class="ghost" id="btn-reset" type="button">重置样例数据</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>操作</h2>
+        <label for="basis">计价口径</label>
+        <select id="basis">
+          <option value="gross">优惠前（gross）</option>
+          <option value="net">优惠后（net）</option>
+        </select>
+        <label for="mode">计算方式</label>
+        <select id="mode">
+          <option value="cached">缓存分粒度中间结果（cached）</option>
+          <option value="raw">逐单重算（raw）</option>
+        </select>
+
+        <div class="ops">
+          <button id="btn-old-summary" type="button">生成旧价带汇总</button>
+        </div>
+        <div class="hint">按 v1 旧边界生成并留档；去年报表此后仍可原样查看。</div>
+
+        <label for="new-boundaries">新边界（逗号分隔的分，需严格递增）</label>
+        <input type="text" id="new-boundaries" value="1500,3000">
+        <div class="ops">
+          <button class="warn" id="btn-publish" type="button">发布新边界</button>
+        </div>
+        <div class="hint">发布后自动按新规则重算一份新报表；旧报表不受影响。</div>
+
+        <label for="boundary-version">边界交易 · 价带版本</label>
+        <select id="boundary-version"></select>
+        <div class="ops">
+          <button id="btn-boundary" type="button">查看边界交易</button>
+        </div>
+        <div class="hint">列出价格恰好等于边界的交易及其唯一归属桶。</div>
+      </div>
+
+      <div class="card">
+        <h2>留档报表</h2>
+        <div id="reports" class="kv">（暂无）</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>业务结果</h2>
+      <div id="banner" class="banner" hidden></div>
+      <!-- 业务结果区：data-evidence-result 标记最近一次操作，便于核对操作前后内容 -->
+      <div id="result" data-evidence-result="idle"></div>
+    </div>
+  </div>
+
+<script>
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const resultEl = $('result');
+const bannerEl = $('banner');
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+const post = (path, body) => api(path, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body || {}),
+});
+
+function showBanner(text, isErr) {
+  bannerEl.textContent = text;
+  bannerEl.className = isErr ? 'banner err' : 'banner';
+  bannerEl.hidden = false;
+}
+
+function setResult(tag, html) {
+  resultEl.setAttribute('data-evidence-result', tag);
+  resultEl.innerHTML = html;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function summaryHtml(report, title) {
+  const rows = report.buckets.map((b) =>
+    `<tr><td class="mono">${esc(b.label)}</td><td>${b.count}</td></tr>`).join('');
+  return `
+    <div class="kv">
+      <div><b>${esc(title)}</b></div>
+      <div><b>报表号</b><span class="mono">${esc(report.id)}</span></div>
+      <div><b>价带版本</b><span class="mono">${esc(report.versionId)}</span>（边界：${report.boundaries.join(', ')} 分）</div>
+      <div><b>计价口径</b>${report.basis === 'net' ? '优惠后 net' : '优惠前 gross'}</div>
+      <div><b>计算方式</b><span class="mono">${esc(report.mode)}</span></div>
+      <div><b>交易总数</b>${report.total}</div>
+    </div>
+    <table><thead><tr><th>桶（分，半开区间）</th><th>单数</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function boundaryHtml(data) {
+  const rows = data.transactions.map((t) =>
+    `<tr><td class="mono">${esc(t.id)}</td><td>${t.grossCents}</td><td>${t.discountCents}</td>` +
+    `<td>${t.priceCents}</td><td>${t.bucketIndex}</td><td class="mono">${esc(t.bucketLabel)}</td></tr>`).join('');
+  return `
+    <div class="kv">
+      <div><b>边界交易</b>（价带 <span class="mono">${esc(data.versionId)}</span>，边界：${data.boundaries.join(', ')} 分，口径：${data.basis === 'net' ? '优惠后' : '优惠前'}）</div>
+      <div><b>命中</b>${data.transactions.length} 笔，每笔只进一个桶</div>
+    </div>
+    <table><thead><tr><th>单号</th><th>优惠前(分)</th><th>优惠(分)</th><th>计价(分)</th><th>桶序号</th><th>桶区间</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="6">无边界交易</td></tr>'}</tbody></table>`;
+}
+
+async function refreshState() {
+  const s = await api('/api/state');
+  $('state').innerHTML = `
+    <div><b>交易数</b>${s.transactionCount}（数据版本 ${s.dataVersion}）</div>
+    <div><b>价带版本</b>${s.versions.map((v) => `<span class="mono">${esc(v.id)}</span>[${v.boundaries.join(', ')}]`).join('　')}</div>
+    <div><b>当前版本</b><span class="mono">${esc(s.currentVersionId)}</span></div>
+    <div><b>缓存统计</b><span class="mono">直方图 命中${s.cacheStats.histogramHit}/未命中${s.cacheStats.histogramMiss}；汇总 命中${s.cacheStats.summaryHit}/未命中${s.cacheStats.summaryMiss}</span></div>`;
+  const sel = $('boundary-version');
+  sel.innerHTML = s.versions.map((v) =>
+    `<option value="${esc(v.id)}">${esc(v.id)}（边界 ${v.boundaries.join(', ')}）</option>`).join('');
+  sel.value = s.currentVersionId;
+  $('reports').innerHTML = s.reports.length === 0 ? '（暂无）' : s.reports.map((r) =>
+    `<div><span class="mono">${esc(r.id)}</span> · 价带 <span class="mono">${esc(r.versionId)}</span> · ${r.basis} · 共 ${r.total} 单 ` +
+    `<button class="ghost" type="button" data-report="${esc(r.id)}">查看</button></div>`).join('');
+  for (const btn of $('reports').querySelectorAll('button[data-report]')) {
+    btn.addEventListener('click', () => viewReport(btn.getAttribute('data-report')));
+  }
+}
+
+async function run(tag, fn) {
+  try {
+    await fn();
+    await refreshState();
+  } catch (err) {
+    showBanner(`操作失败：${err.message}`, true);
+  }
+}
+
+async function generateOldSummary() {
+  const report = await post('/api/reports', {
+    versionId: 'v1',
+    basis: $('basis').value,
+    mode: $('mode').value,
+  });
+  showBanner(`已按旧价带 v1 生成报表 ${report.id}（去年口径留档）`, false);
+  setResult(`summary:${report.id}:${report.versionId}:${report.basis}:${report.mode}`, summaryHtml(report, '旧价带汇总'));
+}
+
+async function publishNewBoundaries() {
+  const boundaries = $('new-boundaries').value.split(',').map((s) => Number(s.trim()));
+  if (boundaries.some((n) => !Number.isInteger(n))) {
+    showBanner('操作失败：边界必须是整数（分）', true);
+    return;
+  }
+  const version = await post('/api/bands/publish', { boundaries });
+  const report = await post('/api/reports', {
+    versionId: version.id,
+    basis: $('basis').value,
+    mode: $('mode').value,
+  });
+  showBanner(`已发布新价带 ${version.id}（边界 ${version.boundaries.join(', ')} 分），并按新规则重算报表 ${report.id}`, false);
+  setResult(`publish:${version.id}:${report.id}`, summaryHtml(report, `新价带 ${version.id} 重算汇总`));
+}
+
+async function viewBoundaryTransactions() {
+  const versionId = $('boundary-version').value;
+  const basis = $('basis').value;
+  const data = await api(`/api/boundary-transactions?versionId=${encodeURIComponent(versionId)}&basis=${encodeURIComponent(basis)}`);
+  showBanner(`价带 ${data.versionId} 下共 ${data.transactions.length} 笔边界交易`, false);
+  setResult(`boundary:${data.versionId}:${data.basis}`, boundaryHtml(data));
+}
+
+async function viewReport(id) {
+  const report = await api(`/api/reports/${encodeURIComponent(id)}`);
+  showBanner(`留档报表 ${report.id}：价带 ${report.versionId}（边界 ${report.boundaries.join(', ')} 分），发布新价带后仍保持旧边界`, false);
+  setResult(`report:${report.id}`, summaryHtml(report, '留档报表'));
+}
+
+$('btn-old-summary').addEventListener('click', () => run('summary', generateOldSummary));
+$('btn-publish').addEventListener('click', () => run('publish', publishNewBoundaries));
+$('btn-boundary').addEventListener('click', () => run('boundary', viewBoundaryTransactions));
+$('btn-refresh').addEventListener('click', () => run('refresh', refreshState));
+$('btn-reset').addEventListener('click', () => run('reset', async () => {
+  await post('/api/reset');
+  resultEl.setAttribute('data-evidence-result', 'reset');
+  resultEl.innerHTML = '';
+  showBanner('已重置为合成样例数据（v1 旧价带 + 12 笔交易）', false);
+}));
+
+refreshState().catch((err) => showBanner(`初始化失败：${err.message}`, true));
+</script>
+</body>
+</html>

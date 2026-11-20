@@ -1,0 +1,11 @@
+{
+  "name": "price-band-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "价带汇总服务：成交价以分存储，价带规则按版本独立发布，半开区间分桶",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}
